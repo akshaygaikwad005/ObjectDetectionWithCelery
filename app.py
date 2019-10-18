@@ -1,5 +1,4 @@
 import warnings
-import sqlite3
 
 warnings.filterwarnings('ignore')
 
@@ -11,6 +10,9 @@ from model import PSPNet101, PSPNet50
 from tools import *
 import json
 from celery_tasks import make_celery
+import sqlite3
+import tensorflow.python.util.deprecation as deprecation
+deprecation._PRINT_DEPRECATION_WARNINGS = False
 
 # Indoor model
 ADE20k_param = {'crop_size': [473, 473],
@@ -109,6 +111,10 @@ def extract_objects():
         filename = secure_filename(file.filename)
         file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
         image_path = "./uploads/" + filename
+        con = create_connection("filestrack.db")
+        cursor = con.cursor()
+        cursor.execute("INSERT into FilesTrack (VideoName, ImageName) values (?, ?)", (video_name, filename))
+        con.commit()
         object_detect.delay(image_path, video_json_file, video_name, filename)
         return "sucess"
 
@@ -118,10 +124,8 @@ def extract_objects():
         con = create_connection("filestrack.db")
         cursor = con.cursor()
         records = cursor.execute("SELECT VideoName from FilesTrack where VideoName = (?)", (video_name,))
-
         isprocessing = records.fetchone()
         cursor.close()
-        print(isprocessing)
         if not isprocessing or isprocessing[0] != video_name:
             video_json_file = result_folder + "/" + video_name + ".json"
 
@@ -156,11 +160,8 @@ def extract_objects():
 
 @task(name="object_detect")
 def object_detect(image_path, video_json_file, video_name, filename):
+    deprecation._PRINT_DEPRECATION_WARNINGS = False
     warnings.filterwarnings('ignore')
-    con = create_connection("filestrack.db")
-    cursor = con.cursor()
-    cursor.execute("INSERT into FilesTrack (VideoName, ImageName) values (?, ?)", (video_name, filename))
-    con.commit()
 
     # print(str(filename + ' ' + image_path))
     param = cityscapes_param
@@ -218,6 +219,7 @@ def object_detect(image_path, video_json_file, video_name, filename):
     with open(video_json_file, 'w') as outfile:
         json.dump(file_result, outfile)
 
+    con = create_connection("filestrack.db")
     cursor = con.cursor()
     cursor.execute("DELETE from FilesTrack WHERE ImageName = (?)", (filename,))
     con.commit()
