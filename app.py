@@ -1,9 +1,11 @@
 import warnings
+import sqlite3
 
 warnings.filterwarnings('ignore')
 
 from werkzeug.utils import secure_filename
-from flask import Flask, request
+from flask import Flask, request, Response
+from flask_api import status
 from celery import task
 from model import PSPNet101, PSPNet50
 from tools import *
@@ -55,6 +57,43 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 result_folder = "./results"
 
 
+
+
+def create_connection(db_file):
+    conn = None
+    try:
+        conn = sqlite3.connect(db_file)
+    except sqlite3.Error as e:
+        print(e)
+
+    return conn
+
+def dropoldertable():
+    con1 = create_connection("filestrack.db")
+    # sqlite3.connect("filestrack.db")
+    cursor1 = con.cursor()
+    cursor1.execute(
+        "create table FilesTrack (id INTEGER PRIMARY KEY AUTOINCREMENT, VideoName TEXT NOT NULL, ImageName TEXT NOT "
+        "NULL)")
+    con1.commit()
+    cursor1.close()
+
+try:
+    con = create_connection("filestrack.db")
+    # sqlite3.connect("filestrack.db")
+    dropoldertable();
+    cursor = con.cursor()
+    cursor.execute(
+        "create table FilesTrack (id INTEGER PRIMARY KEY AUTOINCREMENT, VideoName TEXT NOT NULL, ImageName TEXT NOT "
+        "NULL)")
+    con.commit()
+    cursor.close()
+except Exception:
+    pass
+
+print("Table created successfully")
+
+
 @app.route('/ping')
 def hello_world():
     return 'Hello!!!!'
@@ -70,41 +109,60 @@ def extract_objects():
         filename = secure_filename(file.filename)
         file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
         image_path = "./uploads/" + filename
-
-        object_detect.delay(image_path, video_json_file)
+        object_detect.delay(image_path, video_json_file, video_name, filename)
+        return "sucess"
 
     elif request.method == 'GET':
+
         video_name = request.args.get("video_name")
-        video_json_file = result_folder + "/" + video_name + ".json"
+        con = create_connection("filestrack.db")
+        cursor = con.cursor()
+        records = cursor.execute("SELECT VideoName from FilesTrack where VideoName = (?)", (video_name,))
 
-        if os.path.exists(video_json_file):
-            with open(video_json_file, "r") as jsonFile:
-                images = json.load(jsonFile)
+        isprocessing = records.fetchone()
+        cursor.close()
+        print(isprocessing)
+        if not isprocessing or isprocessing[0] != video_name:
+            video_json_file = result_folder + "/" + video_name + ".json"
+
+            if os.path.exists(video_json_file):
+                with open(video_json_file, "r") as jsonFile:
+                    images = json.load(jsonFile)
+            else:
+                return "There is no data for this video file"
+
+            images = images["images"]
+            aggregate = data
+            # print("IMAGES", images)
+            # print("AGG", aggregate)
+            length = len(images.values())
+            for file_name, d in images.items():
+                for k, v in d.items():
+                    aggregate[k] = aggregate[k] + v
+
+            total_perc = {}
+            for k, v in aggregate.items():
+                total_perc[k] = v / length
+
+            image_Result = {'images': images, 'aggregate': total_perc}
+            return image_Result
         else:
-            return "There is no data for this video file"
+            isprocessing = ""
+            return Response(json.dumps({'Procssing': 'Calculation Under processing'}),
+                            status=429,
+                            mimetype="application/json")
 
-        images = images["images"]
-        aggregate = data
-        # print("IMAGES", images)
-        # print("AGG", aggregate)
-        length = len(images.values())
-        for file_name, d in images.items():
-            for k, v in d.items():
-                aggregate[k] = aggregate[k] + v
-
-        total_perc = {}
-        for k, v in aggregate.items():
-            total_perc[k] = v / length
-
-        image_Result = {'images': images, 'aggregate': total_perc}
-        return image_Result
-
-    return "Success!"
 
 
 @task(name="object_detect")
-def object_detect(image_path, video_json_file):
-   # print(str(filename + ' ' + image_path))
+def object_detect(image_path, video_json_file, video_name, filename):
+    warnings.filterwarnings('ignore')
+    con = create_connection("filestrack.db")
+    cursor = con.cursor()
+    cursor.execute("INSERT into FilesTrack (VideoName, ImageName) values (?, ?)", (video_name, filename))
+    con.commit()
+
+    # print(str(filename + ' ' + image_path))
     param = cityscapes_param
     img_np, filename = load_img(image_path)
     img_shape = tf.shape(img_np)
@@ -159,6 +217,11 @@ def object_detect(image_path, video_json_file):
 
     with open(video_json_file, 'w') as outfile:
         json.dump(file_result, outfile)
+
+    cursor = con.cursor()
+    cursor.execute("DELETE from FilesTrack WHERE ImageName = (?)", (filename,))
+    con.commit()
+    cursor.close()
 
 
 if __name__ == '__main__':
